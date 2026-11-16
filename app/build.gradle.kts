@@ -44,3 +44,4 @@ dependencies {
         "com.google.mlkit:text-recognition:16.0.1"
     )
 }
+implementation("com.google.mlkit:image-labeling:17.0.9")
