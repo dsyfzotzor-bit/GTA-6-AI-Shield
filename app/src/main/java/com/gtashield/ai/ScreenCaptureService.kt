@@ -10,17 +10,18 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
-import android.os.Binder
 import android.os.Build
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
+import android.util.DisplayMetrics
 
 class ScreenCaptureService : Service() {
 
     companion object {
         const val ACTION_START =
             "com.gtashield.ai.action.START_CAPTURE"
+
+        const val ACTION_STOP =
+            "com.gtashield.ai.action.STOP_CAPTURE"
 
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
@@ -29,16 +30,12 @@ class ScreenCaptureService : Service() {
         private const val NOTIFICATION_ID = 1001
     }
 
-    private val binder = LocalBinder()
-
     private var mediaProjection: MediaProjection? = null
+    private var protectionSession: LiveScreenProtectionSession? = null
+    private var responder: SpoilerProtectionResponder? = null
 
-    inner class LocalBinder : Binder() {
-        fun getService(): ScreenCaptureService = this@ScreenCaptureService
-    }
-
-    override fun onBind(intent: Intent?): IBinder {
-        return binder
+    override fun onBind(intent: Intent?): IBinder? {
+        return null
     }
 
     override fun onStartCommand(
@@ -47,9 +44,29 @@ class ScreenCaptureService : Service() {
         startId: Int
     ): Int {
 
-        if (intent?.action != ACTION_START) {
-            stopSelf()
-            return START_NOT_STICKY
+        when (intent?.action) {
+
+            ACTION_STOP -> {
+                stopCapture()
+                return START_NOT_STICKY
+            }
+
+            ACTION_START -> {
+                startCapture(intent)
+            }
+
+            else -> {
+                stopSelf()
+            }
+        }
+
+        return START_NOT_STICKY
+    }
+
+    private fun startCapture(intent: Intent) {
+
+        if (mediaProjection != null) {
+            return
         }
 
         val resultCode = intent.getIntExtra(
@@ -70,7 +87,7 @@ class ScreenCaptureService : Service() {
 
         if (resultCode != Activity.RESULT_OK || resultData == null) {
             stopSelf()
-            return START_NOT_STICKY
+            return
         }
 
         try {
@@ -98,41 +115,84 @@ class ScreenCaptureService : Service() {
                 resultData
             )
 
-            if (mediaProjection == null) {
-                stopSelf()
-                return START_NOT_STICKY
-            }
+            val projection = mediaProjection
+                ?: throw IllegalStateException(
+                    "MediaProjection could not be created."
+                )
 
-            mediaProjection?.registerCallback(
+            projection.registerCallback(
                 object : MediaProjection.Callback() {
                     override fun onStop() {
                         mediaProjection = null
-                        stopSelf()
+                        stopCapture()
                     }
                 },
-                Handler(Looper.getMainLooper())
+                android.os.Handler(mainLooper)
             )
 
+            startAnalysis(projection)
+
         } catch (error: Exception) {
-            stopSelf()
-            return START_NOT_STICKY
+            stopCapture()
+        }
+    }
+
+    private fun startAnalysis(projection: MediaProjection) {
+
+        val metrics = DisplayMetrics()
+
+        @Suppress("DEPRECATION")
+        windowManager.defaultDisplay.getRealMetrics(metrics)
+
+        val width = metrics.widthPixels
+        val height = metrics.heightPixels
+        val densityDpi = metrics.densityDpi
+
+        responder = SpoilerProtectionResponder(this)
+
+        val session = LiveScreenProtectionSession()
+        protectionSession = session
+
+        session.start(
+            projection = projection,
+            width = width,
+            height = height,
+            densityDpi = densityDpi,
+
+            onReport = { report ->
+                responder?.handle(report)
+            },
+
+            onError = {
+                // Capture errors are handled by the session.
+            },
+
+            onBusy = {
+                // A frame is skipped while analysis is busy.
+            }
+        )
+    }
+
+    private fun stopCapture() {
+
+        protectionSession?.stop()
+        protectionSession = null
+
+        responder?.hideProtection()
+        responder = null
+
+        mediaProjection?.let {
+            mediaProjection = null
+            it.stop()
         }
 
-        return START_NOT_STICKY
-    }
-
-    fun getProjection(): MediaProjection? {
-        return mediaProjection
-    }
-
-    fun stopCapture() {
-        mediaProjection?.stop()
-        mediaProjection = null
+        stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "GTA 6 Shield Screen Protection",
@@ -148,6 +208,7 @@ class ScreenCaptureService : Service() {
     }
 
     private fun buildNotification(): Notification {
+
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("GTA 6 AI Shield")
             .setContentText("Screen protection session is active")
@@ -157,8 +218,14 @@ class ScreenCaptureService : Service() {
     }
 
     override fun onDestroy() {
-        mediaProjection?.stop()
+        protectionSession?.stop()
+        protectionSession = null
+
+        responder?.hideProtection()
+        responder = null
+
         mediaProjection = null
+
         super.onDestroy()
     }
 }
